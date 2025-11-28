@@ -1,7 +1,13 @@
 """
-Hypertension Tracker — Clean White + Blue redesign
-Drop this file into your Streamlit app folder and run: streamlit run app.py
-Requirements: streamlit, pandas, altair, plotly
+Hypertension Tracker — Clean White + Blue with local JSON users + security-question reset
+
+Usage:
+    pip install streamlit pandas altair
+    streamlit run app.py
+
+Files created/used:
+    - users.json     : stores registered users (hashed)
+    - records.json   : stores BP readings
 """
 
 import streamlit as st
@@ -9,82 +15,120 @@ import pandas as pd
 import altair as alt
 from datetime import datetime
 import hashlib
+import json
+from pathlib import Path
+from typing import Dict, Any
 
-# ----------------------------
-# Helper utilities
-# ----------------------------
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+# -------------------------
+# Configuration / Constants
+# -------------------------
+USERS_FILE = Path("users.json")
+RECORDS_FILE = Path("records.json")
 
-def check_credentials(username: str, password: str, users: dict) -> bool:
-    """
-    users: dict mapping username -> hashed_password
-    """
-    return users.get(username) == hash_password(password)
+SECURITY_QUESTIONS = [
+    "What is your mother's maiden name?",
+    "What was the name of your first pet?",
+    "What is your favourite food?",
+    "What city were you born in?",
+    "What was your childhood nickname?"
+]
 
-def init_session_state():
+# -------------------------
+# Utility functions
+# -------------------------
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def load_json(path: Path, default):
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default
+    else:
+        return default
+
+def save_json(path: Path, data):
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+def load_users() -> Dict[str, Dict[str, Any]]:
+    """Return dict: username -> {password: <hash>, qid: <int>, answer: <hash> }"""
+    return load_json(USERS_FILE, {})
+
+def save_users(users: Dict[str, Dict[str, Any]]):
+    save_json(USERS_FILE, users)
+
+def load_records() -> pd.DataFrame:
+    data = load_json(RECORDS_FILE, [])
+    if not data:
+        return pd.DataFrame(columns=["timestamp", "username", "systolic", "diastolic", "category"])
+    df = pd.DataFrame(data)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
+
+def save_records(df: pd.DataFrame):
+    df_to_save = df.copy()
+    # convert timestamps to ISO
+    if "timestamp" in df_to_save.columns:
+        df_to_save["timestamp"] = df_to_save["timestamp"].apply(lambda x: pd.to_datetime(x).isoformat())
+    save_json(RECORDS_FILE, df_to_save.to_dict(orient="records"))
+
+def classify_bp(s: int, d: int) -> str:
+    # Simplified AHA categories
+    if s < 120 and d < 80:
+        return "Normal"
+    if 120 <= s < 130 and d < 80:
+        return "Elevated"
+    if (130 <= s < 140) or (80 <= d < 90):
+        return "Stage 1 Hypertension"
+    return "Stage 2 Hypertension"
+
+# -------------------------
+# Session state initialization
+# -------------------------
+def init_session():
     if "page" not in st.session_state:
-        st.session_state.page = "login"
+        st.session_state.page = "home"
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if "username" not in st.session_state:
         st.session_state.username = ""
+    if "users" not in st.session_state:
+        st.session_state.users = load_users()
     if "records" not in st.session_state:
-        # small sample schema; in production, load from DB/CSV
-        st.session_state.records = pd.DataFrame(
-            columns=["timestamp", "username", "systolic", "diastolic", "category"]
-        )
+        st.session_state.records = load_records()
 
-def save_reading(username, s, d):
-    # classifies based on simplified AHA categories
-    s = int(s)
-    d = int(d)
-    if s < 120 and d < 80:
-        cat = "Normal"
-    elif (120 <= s < 130) and d < 80:
-        cat = "Elevated"
-    elif (130 <= s < 140) or (80 <= d < 90):
-        cat = "Stage 1 Hypertension"
-    else:
-        cat = "Stage 2 Hypertension"
-    record = {
-        "timestamp": datetime.now(),
-        "username": username,
-        "systolic": s,
-        "diastolic": d,
-        "category": cat,
-    }
-    st.session_state.records = pd.concat(
-        [st.session_state.records, pd.DataFrame([record])],
-        ignore_index=True,
-    )
+init_session()
 
-# ----------------------------
-# Styling (Clean white + blue)
-# ----------------------------
+# -------------------------
+# Styling: Clean White + Blue
+# -------------------------
 st.set_page_config(page_title="Hypertension Tracker", layout="wide", page_icon="🫀")
+
 st.markdown(
     """
     <style>
-    /* Page background */
+    /* Background & font */
     .reportview-container, .main {
         background-color: #ffffff;
     }
     /* Sidebar */
-    .css-1d391kg { padding-top: 1rem; }
-    .stSidebar { background-color: #f7fbff; }
-    /* Big header */
+    .stSidebar {
+        background-color: #f5f9ff;
+    }
+    /* Titles */
     .big-title {
-        font-size:34px;
+        font-size:32px;
         font-weight:700;
         color:#0b3d91;
-        margin-bottom: 0;
+        margin-bottom: 4px;
     }
     .sub-title {
-        font-size:18px;
+        font-size:15px;
         color:#1f3f7a;
-        margin-top: 4px;
-        margin-bottom: 24px;
+        margin-top: 0px;
+        margin-bottom: 18px;
     }
     /* Card */
     .card {
@@ -102,280 +146,310 @@ st.markdown(
         padding:8px 14px;
         font-weight:600;
     }
+    .stTextInput>div>input, .stNumberInput>div>input {
+        border-radius:8px;
+        padding:10px;
+    }
     .small-muted {
         color:#6b7280;
         font-size:13px;
     }
     </style>
-    """,
-    unsafe_allow_html=True,
+    """, unsafe_allow_html=True
 )
 
-# ----------------------------
-# Initialize
-# ----------------------------
-init_session_state()
-
-# ----------------------------
-# Credentials - use st.secrets in production!
-# For demo, create default user stored in code (please move to secrets)
-# ----------------------------
-# Use st.secrets["users"] in production. Example secrets.toml:
-# [users]
-# admin = "sha256-hash-here"
-default_users = {
-    # username: hashed_password  (change these; use st.secrets for production)
-    "admin": hash_password("adminpassword"),
-}
-
-# If the app is deployed to Streamlit Cloud, add production users to st.secrets["users"]
-if "users" in st.secrets:
-    # expect st.secrets["users"] to be dict username -> plain-text password
-    users = {
-        u: hash_password(p)
-        for u, p in st.secrets["users"].items()
-    }
-else:
-    users = default_users
-
-# ----------------------------
-# Sidebar - navigation & account
-# ----------------------------
+# -------------------------
+# Sidebar (Navigation + Account)
+# -------------------------
 with st.sidebar:
     st.markdown("## Account")
-    action = st.selectbox("Action", options=["Login", "Logout", "Create sample data"])
+    account_action = st.selectbox("Action", options=["Login", "Sign up", "Forgot password", "Logout"])
     st.markdown("---")
     st.markdown("## Navigate")
-    nav = st.radio("", options=["Home", "Records", "Charts", "Insights", "About"])
+    nav = st.radio("", options=["Home", "Add Reading", "Records", "Charts", "Insights", "About"])
     st.markdown("---")
-    st.markdown('<div class="small-muted">Security note: store production credentials in <code>st.secrets</code>.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="small-muted">Security: passwords & answers are hashed locally. For production use a DB.</div>', unsafe_allow_html=True)
 
-# Sidebar actions
-if action == "Logout":
+# Handle Logout action early
+if account_action == "Logout":
     st.session_state.logged_in = False
     st.session_state.username = ""
-    st.session_state.page = "login"
+    st.session_state.page = "home"
+    # continue to show home (no message)
 
-if action == "Create sample data":
-    # create a few sample readings for visual testing (only if empty)
-    if st.session_state.records.empty:
-        sample = pd.DataFrame([
-            {"timestamp": datetime.now(), "username": "admin", "systolic": 118, "diastolic": 76, "category": "Normal"},
-            {"timestamp": datetime.now(), "username": "admin", "systolic": 132, "diastolic": 84, "category": "Stage 1 Hypertension"},
-            {"timestamp": datetime.now(), "username": "admin", "systolic": 140, "diastolic": 92, "category": "Stage 2 Hypertension"},
-        ])
-        st.session_state.records = pd.concat([st.session_state.records, sample], ignore_index=True)
-        st.success("Sample records added. Use 'Logout' to reset.")
+# Map navigation to page
+st.session_state.page = nav.lower().replace(" ", "_")
 
-# Map radio nav to page
-st.session_state.page = nav.lower()
-
-# ----------------------------
-# Pages
-# ----------------------------
-def page_login():
-    st.markdown('<div class="big-title">Hypertension Tracker</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Secure tracking · Understand trends · Improve outcomes</div>', unsafe_allow_html=True)
-
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.empty()  # left space
-    with col2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Login")
-        username = st.text_input("Username", value="", placeholder="Enter your username")
-        password = st.text_input("Password", type="password", placeholder="Enter your password")
-        if st.button("Login"):
-            if check_credentials(username.strip(), password.strip(), users):
-                st.session_state.logged_in = True
-                st.session_state.username = username.strip()
-                st.success(f"Welcome, {st.session_state.username}.")
-                # change page to home after login
-                st.session_state.page = "home"
-                st.experimental_rerun()
-            else:
-                st.error("Invalid credentials. For production, add users to `st.secrets['users']`.")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-def page_home():
-    st.markdown('<div class="big-title">Hypertension Tracker</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Quickly add readings and see trends</div>', unsafe_allow_html=True)
-
-    # Welcome / Banner
+# -------------------------
+# Auth pages: Sign up / Login / Forgot
+# -------------------------
+def signup_ui():
+    st.markdown('<div class="big-title">Create account</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Register to store your readings and see personalized insights</div>', unsafe_allow_html=True)
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(f"**Welcome, {st.session_state.username or 'User'}.**")
-    st.markdown("Use the form below to add a new blood pressure reading. Fields start empty to avoid accidental submissions.")
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.write("")
+    with st.form("signup_form"):
+        uname = st.text_input("Choose a username", value="", placeholder="e.g., mayowa")
+        pwd = st.text_input("Password", type="password", placeholder="Create a secure password")
+        pwd2 = st.text_input("Confirm password", type="password", placeholder="Repeat the password")
+        qid = st.selectbox("Security question", options=list(range(len(SECURITY_QUESTIONS))), format_func=lambda i: SECURITY_QUESTIONS[i])
+        ans = st.text_input("Answer to security question", placeholder="Type an answer you'll remember")
+        submitted = st.form_submit_button("Create account")
+        if submitted:
+            users = st.session_state.users
+            if not uname or not pwd or not pwd2 or not ans:
+                st.error("All fields are required.")
+            elif uname in users:
+                st.error("Username already exists. Choose a different username.")
+            elif pwd != pwd2:
+                st.error("Passwords do not match.")
+            else:
+                users[uname] = {
+                    "password": sha256(pwd),
+                    "qid": int(qid),
+                    "answer": sha256(ans.strip().lower())
+                }
+                save_users(users)
+                st.session_state.users = users
+                st.success("Account created. You can now log in.")
+                st.session_state.page = "add_reading"
+                st.experimental_rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Add reading card
+def login_ui():
+    st.markdown('<div class="big-title">Login</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Access your readings and insights</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    with st.form("login_form"):
+        uname = st.text_input("Username", value="", placeholder="Enter your username")
+        pwd = st.text_input("Password", type="password", placeholder="Enter your password")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            users = st.session_state.users
+            if uname not in users or users[uname]["password"] != sha256(pwd):
+                st.error("Invalid username or password.")
+            else:
+                st.session_state.logged_in = True
+                st.session_state.username = uname
+                st.success(f"Welcome, {uname}.")
+                # Move user to Add Reading after login
+                st.session_state.page = "add_reading"
+                st.experimental_rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def forgot_ui():
+    st.markdown('<div class="big-title">Reset password</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Reset using your security question</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    with st.form("forgot_form"):
+        uname = st.text_input("Username", value="", placeholder="Enter your username")
+        if uname and uname in st.session_state.users:
+            qid = st.session_state.users[uname]["qid"]
+            st.markdown(f"**Security question:** {SECURITY_QUESTIONS[qid]}")
+            ans = st.text_input("Answer to security question", placeholder="Type your answer")
+            new_pwd = st.text_input("New password", type="password", placeholder="Enter a new password")
+            new_pwd2 = st.text_input("Confirm new password", type="password", placeholder="Repeat new password")
+        else:
+            # show unpopulated fields but disable until valid username entered
+            st.info("Enter your username above to see your security question.")
+            ans = ""
+            new_pwd = ""
+            new_pwd2 = ""
+        submitted = st.form_submit_button("Reset password")
+        if submitted:
+            users = st.session_state.users
+            if uname not in users:
+                st.error("Username not found.")
+            else:
+                if not ans or not new_pwd or not new_pwd2:
+                    st.error("All fields are required.")
+                elif new_pwd != new_pwd2:
+                    st.error("Passwords do not match.")
+                elif users[uname]["answer"] != sha256(ans.strip().lower()):
+                    st.error("Incorrect answer to security question.")
+                else:
+                    users[uname]["password"] = sha256(new_pwd)
+                    save_users(users)
+                    st.session_state.users = users
+                    st.success("Password reset successful. Please login with your new password.")
+                    st.session_state.page = "home"
+                    st.experimental_rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------
+# Main page components
+# -------------------------
+def header():
+    st.markdown('<div class="big-title">Hypertension Tracker</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Simple logs · Clear trends · Better awareness</div>', unsafe_allow_html=True)
+
+def add_reading_ui():
+    header()
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Add New Reading")
-    with st.form("add_reading", clear_on_submit=False):
-        c1, c2, c3 = st.columns([1, 1, 0.6])
-        with c1:
-            sys_txt = st.text_input("Systolic (mmHg)", key="systolic_input", placeholder="e.g., 120")
-        with c2:
-            dia_txt = st.text_input("Diastolic (mmHg)", key="diastolic_input", placeholder="e.g., 80")
-        with c3:
-            st.write("")  # spacing
-            st.write("")
-        submitted = st.form_submit_button("Save Reading")
-        if submitted:
-            # Validations
+    with st.form("reading_form"):
+        col1, col2, col3 = st.columns([1,1,0.6])
+        with col1:
+            systolic = st.text_input("Systolic (mmHg)", value="", placeholder="e.g., 120", key="systolic")
+        with col2:
+            diastolic = st.text_input("Diastolic (mmHg)", value="", placeholder="e.g., 80", key="diastolic")
+        with col3:
+            st.write("")  # empty for spacing
+        submit = st.form_submit_button("Save reading")
+        if submit:
             if not st.session_state.logged_in:
-                st.error("Please login before saving a reading.")
+                st.error("Please login to save readings.")
             else:
-                if sys_txt.strip() == "" or dia_txt.strip() == "":
-                    st.error("Both systolic and diastolic are required.")
+                if not systolic.strip() or not diastolic.strip():
+                    st.error("Systolic and diastolic are required.")
                 else:
                     try:
-                        s_val = int(float(sys_txt))
-                        d_val = int(float(dia_txt))
+                        s_val = int(float(systolic))
+                        d_val = int(float(diastolic))
                         if s_val <= 0 or d_val <= 0:
                             raise ValueError
-                        save_reading(st.session_state.username, s_val, d_val)
-                        st.success(f"Saved: {s_val}/{d_val} mmHg.")
+                        category = classify_bp(s_val, d_val)
+                        # append to records
+                        df = st.session_state.records.copy()
+                        new = {
+                            "timestamp": datetime.now(),
+                            "username": st.session_state.username,
+                            "systolic": s_val,
+                            "diastolic": d_val,
+                            "category": category
+                        }
+                        df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
+                        st.session_state.records = df
+                        save_records(df)
+                        st.success(f"Saved {s_val}/{d_val} mmHg — {category}.")
                         # clear inputs
-                        st.session_state["systolic_input"] = ""
-                        st.session_state["diastolic_input"] = ""
+                        st.session_state["systolic"] = ""
+                        st.session_state["diastolic"] = ""
                         st.experimental_rerun()
                     except ValueError:
-                        st.error("Enter valid numeric values for systolic and diastolic.")
+                        st.error("Enter valid numeric values for BP (e.g., 120).")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Quick Summary (last 5)
+    # Quick summary
     st.write("")
-    st.subheader("Quick Summary")
-    recent = st.session_state.records[st.session_state.records["username"] == st.session_state.username].sort_values(by="timestamp", ascending=False).head(5)
-    if recent.empty:
+    st.subheader("Quick summary (latest 5 readings)")
+    df_user = st.session_state.records
+    if st.session_state.username:
+        df_user = df_user[df_user["username"] == st.session_state.username]
+    if df_user.empty:
         st.info("No readings yet. Add your first reading above.")
     else:
-        # show table
-        df_display = recent.copy()
-        df_display["timestamp"] = pd.to_datetime(df_display["timestamp"]).dt.strftime("%Y-%m-%d %H:%M")
-        st.table(df_display[["timestamp", "systolic", "diastolic", "category"]].reset_index(drop=True))
+        df_show = df_user.sort_values("timestamp", ascending=False).head(5).copy()
+        df_show["timestamp"] = pd.to_datetime(df_show["timestamp"]).dt.strftime("%Y-%m-%d %H:%M")
+        st.table(df_show[["timestamp", "systolic", "diastolic", "category"]].reset_index(drop=True))
 
-def page_records():
+def records_ui():
     st.header("Records")
-    user_records = st.session_state.records
-    if st.session_state.username:
-        user_records = user_records[user_records["username"] == st.session_state.username]
-    if user_records.empty:
-        st.info("No records to show.")
-        return
-    user_records = user_records.sort_values(by="timestamp", ascending=False)
-    # Filters
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        date_from = st.date_input("From", value=None)
-        date_to = st.date_input("To", value=None)
-    with col2:
-        if st.button("Delete all my records"):
-            st.session_state.records = st.session_state.records[st.session_state.records["username"] != st.session_state.username]
-            st.success("Deleted your records.")
-            st.experimental_rerun()
-    st.dataframe(user_records.reset_index(drop=True))
-
-def page_charts():
-    st.header("Charts")
     df = st.session_state.records.copy()
-    if df.empty:
-        st.info("No data to plot. Add readings on the Home page.")
-        return
-    # filter to current user
     if st.session_state.username:
         df = df[df["username"] == st.session_state.username]
+    if df.empty:
+        st.info("No records to show.")
+        return
+    df = df.sort_values("timestamp", ascending=False)
+    st.dataframe(df.reset_index(drop=True))
+
+def charts_ui():
+    st.header("Charts")
+    df = st.session_state.records.copy()
+    if st.session_state.username:
+        df = df[df["username"] == st.session_state.username]
+    if df.empty:
+        st.info("No data to plot.")
+        return
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("timestamp")
     base = alt.Chart(df).encode(x=alt.X("timestamp:T", title="Date"))
-    line = base.mark_line(point=True).encode(
+    line_s = base.mark_line(point=True).encode(
         y=alt.Y("systolic:Q", title="Systolic (mmHg)"),
         tooltip=["timestamp:T", "systolic", "diastolic", "category"]
-    ).properties(width=800, height=300)
-    line2 = base.mark_line(point=True, color="#0b60d1").encode(
+    )
+    line_d = base.mark_line(point=True, color="#0b60d1").encode(
         y=alt.Y("diastolic:Q", title="Diastolic (mmHg)"),
         tooltip=["timestamp:T", "systolic", "diastolic", "category"]
     )
-    st.altair_chart(line + line2, use_container_width=True)
+    st.altair_chart(line_s + line_d, use_container_width=True)
 
-    # Category distribution
     cat = df.groupby("category").size().reset_index(name="count")
-    chart = alt.Chart(cat).mark_bar().encode(
-        x="category:N",
-        y="count:Q",
-        color=alt.Color("category:N", legend=None)
-    ).properties(width=600, height=250)
-    st.altair_chart(chart, use_container_width=False)
+    bar = alt.Chart(cat).mark_bar().encode(x="category:N", y="count:Q", color="category:N")
+    st.altair_chart(bar, use_container_width=True)
 
-def page_insights():
+def insights_ui():
     st.header("Insights")
     df = st.session_state.records.copy()
-    if df.empty:
-        st.info("No data yet.")
-        return
     if st.session_state.username:
         df = df[df["username"] == st.session_state.username]
+    if df.empty:
+        st.info("No insights yet.")
+        return
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    last_30_days = df[df["timestamp"] >= (datetime.now() - pd.Timedelta(days=30))]
-    st.metric("Readings (30d)", last_30_days.shape[0])
-    if not last_30_days.empty:
-        avg_sys = int(last_30_days["systolic"].mean())
-        avg_dia = int(last_30_days["diastolic"].mean())
-        st.metric("Avg BP (30d)", f"{avg_sys}/{avg_dia} mmHg")
-    st.write("")
-    st.write("Top categories in your data:")
+    last30 = df[df["timestamp"] >= (datetime.now() - pd.Timedelta(days=30))]
+    st.metric("Readings (30d)", last30.shape[0])
+    if not last30.empty:
+        avg_s = int(last30["systolic"].mean())
+        avg_d = int(last30["diastolic"].mean())
+        st.metric("Avg BP (30d)", f"{avg_s}/{avg_d} mmHg")
+    st.write("Category distribution:")
     st.write(df["category"].value_counts())
 
-def page_about():
+def about_ui():
     st.header("About")
     st.markdown(
         """
-        **Hypertension Tracker**
-        
-        A small, clean tool to log blood pressure readings, classify them, and surface trends.
-        
-        Built with a clean White + Blue hospital-inspired UI for clear readability.
+        **Hypertension Tracker** – minimal, clean tool to log blood pressure readings and view trends.
         
         **Notes**
-        - For production: move authentication to st.secrets or a proper user database.
-        - Persist records to an external DB (SQLite/Postgres) or to a CSV in cloud storage.
+        - Users and readings are stored locally in `users.json` and `records.json`.
+        - For production durability use a database (SQLite/Postgres) and secure secrets.
+        - Passwords and security answers are hashed locally (SHA-256).
         """
     )
 
-# ----------------------------
-# Router
-# ----------------------------
-page = st.session_state.page
-
-if page == "login":
-    page_login()
-elif page == "home":
-    if not st.session_state.logged_in:
-        st.warning("Please login first.")
-        page_login()
-    else:
-        page_home()
-elif page == "records":
-    if not st.session_state.logged_in:
-        st.warning("Please login first.")
-        page_login()
-    else:
-        page_records()
-elif page == "charts":
-    if not st.session_state.logged_in:
-        st.warning("Please login first.")
-        page_login()
-    else:
-        page_charts()
-elif page == "insights":
-    if not st.session_state.logged_in:
-        st.warning("Please login first.")
-        page_login()
-    else:
-        page_insights()
-elif page == "about":
-    page_about()
+# -------------------------
+# Router & account action handling
+# -------------------------
+# If user selected account actions from sidebar, prioritize rendering that flow
+if account_action == "Sign up":
+    signup_ui()
+elif account_action == "Login":
+    login_ui()
+elif account_action == "Forgot password":
+    forgot_ui()
 else:
-    st.write("Page not found.")
+    # Normal navigation-based pages
+    page = st.session_state.page
+    if page == "home":
+        header()
+        if st.session_state.logged_in:
+            st.success(f"Welcome back, {st.session_state.username}.")
+        else:
+            st.info("Sign up or log in to save readings and view personalized insights.")
+    elif page == "add_reading":
+        add_reading_ui()
+    elif page == "records":
+        if not st.session_state.logged_in:
+            st.warning("Please login to view your records.")
+        else:
+            records_ui()
+    elif page == "charts":
+        if not st.session_state.logged_in:
+            st.warning("Please login to view charts.")
+        else:
+            charts_ui()
+    elif page == "insights":
+        if not st.session_state.logged_in:
+            st.warning("Please login to view insights.")
+        else:
+            insights_ui()
+    elif page == "about":
+        about_ui()
+    else:
+        st.write("Page not found.")
+
+# -------------------------
+# End of app
+# -------------------------
